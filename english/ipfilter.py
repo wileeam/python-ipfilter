@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import requests
 import gzip
@@ -6,6 +7,7 @@ import datetime
 import ipaddress
 import re
 from tqdm import tqdm
+import argparse
 
 # List definitions, more can be added
 LISTS = [
@@ -64,7 +66,7 @@ def convert_to_ipfilter_format(source_path, destination_path, log_lines, append=
 
     log_lines.append(f"[{list_name}] Summary: {converted} processed, {corrected} corrected, {skipped} skipped\n")
 
-def download_and_process_lists(block_list_path):
+def download_and_process_lists(block_list_path, overwrite=False):
     block_list_path_resolved = os.path.abspath(block_list_path)
     final_ipfilter_file = os.path.join(block_list_path_resolved, 'ipfilter.dat')
     temp_file = os.path.join(block_list_path_resolved, 'temp_download.gz')
@@ -77,15 +79,19 @@ def download_and_process_lists(block_list_path):
     log_lines.append(f"===== IPFilter update started: {now} =====\n")
 
     if os.path.exists(final_ipfilter_file):
-        answer = input(f"The file '{final_ipfilter_file}' already exists. Overwrite? (y/n): ").strip().lower()
-        if answer != 'y':
-            print("Aborted. The file was not overwritten.")
-            return
+        if not overwrite:
+            answer = input(f"The file '{final_ipfilter_file}' already exists. Overwrite? (y/n): ").strip().lower()
+            if answer != 'y':
+                print("Aborted. The file was not overwritten.")
+                return
+        else:
+            # Overwrite without prompting
+            log_lines.append(f"Existing file '{final_ipfilter_file}' will be overwritten by automation.")
 
     print("The following IP filter lists will be downloaded and merged:\n")
     for name, _ in LISTS:
         print(f"- {name}")
-    print()
+    print() 
 
     first_list = True
     for name, url in LISTS:
@@ -137,6 +143,11 @@ def download_and_process_lists(block_list_path):
     print("* Go to: Tools → Options → Connection → IP Filtering")
     print(f"* Set the filter file to: '{final_ipfilter_file}'")
 
-# Run script
-block_list_path = os.getcwd()
-download_and_process_lists(block_list_path)
+# Run script when executed directly; provide CLI for CI automation
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Download and build ipfilter.dat from configured lists')
+    parser.add_argument('--output-dir', '-o', default=os.getcwd(), help='Directory to write ipfilter.dat and log.txt')
+    parser.add_argument('--yes', '-y', action='store_true', help='Automatically overwrite existing ipfilter.dat without prompting')
+    args = parser.parse_args()
+
+    download_and_process_lists(args.output_dir, overwrite=args.yes)
