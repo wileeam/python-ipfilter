@@ -37,6 +37,13 @@ jobs:
         run: |
           python ipfilter.py --output-dir . --yes
 
+      - name: Verify generated output
+        run: |
+          if [ ! -s ipfilter.dat ]; then
+            echo "ipfilter.dat is missing or empty — aborting PR creation"
+            exit 1
+          fi
+
       - name: Create pull request with generated files
         uses: peter-evans/create-pull-request@v5
         with:
