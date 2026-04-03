@@ -37,6 +37,19 @@ jobs:
         run: |
           python ipfilter.py --output-dir . --yes
 
+      - name: Verify generated files exist
+        run: |
+          if [ ! -f "ipfilter.dat" ]; then
+            echo "Error: ipfilter.dat was not created"
+            exit 1
+          fi
+          if [ ! -f "log.txt" ]; then
+            echo "Error: log.txt was not created"
+            exit 1
+          fi
+          echo "✓ ipfilter.dat exists"
+          echo "✓ log.txt exists"
+
       - name: Create pull request with generated files
         uses: peter-evans/create-pull-request@v5
         with:
