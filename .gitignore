@@ -37,8 +37,6 @@ env/
 *~
 
 # Generated files
-ipfilter.dat
-log.txt
 *.p2p
 *.gz
 
