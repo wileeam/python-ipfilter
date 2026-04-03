@@ -50,15 +50,16 @@ jobs:
           labels: automated, ci
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 
-      - name: Verify generated files exist
+      - name: Verify generated files exist in repository
         run: |
-          if [ ! -f "ipfilter.dat" ]; then
-            echo "Error: ipfilter.dat was not created"
+          # Check if files are tracked in git repository
+          if ! git ls-files --error-unmatch ipfilter.dat >/dev/null 2>&1; then
+            echo "Error: ipfilter.dat was not committed to the repository"
             exit 1
           fi
-          if [ ! -f "log.txt" ]; then
-            echo "Error: log.txt was not created"
+          if ! git ls-files --error-unmatch log.txt >/dev/null 2>&1; then
+            echo "Error: log.txt was not committed to the repository"
             exit 1
           fi
-          echo "✓ ipfilter.dat exists"
-          echo "✓ log.txt exists"
+          echo "✓ ipfilter.dat is committed to the repository"
+          echo "✓ log.txt is committed to the repository"
