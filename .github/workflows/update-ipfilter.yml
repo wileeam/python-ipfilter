@@ -35,8 +35,7 @@ jobs:
 
       - name: Run ipfilter generation
         run: |
-          # write outputs into the english/ directory
-          python english/ipfilter.py --output-dir english --yes
+          python ipfilter.py --output-dir . --yes
 
       - name: Create pull request with generated files
         uses: peter-evans/create-pull-request@v5
