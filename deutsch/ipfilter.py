@@ -5,6 +5,7 @@ import shutil
 import datetime
 import ipaddress
 import re
+import time
 from tqdm import tqdm
 
 # Listen-Definitionen, weitere können hinzugefügt werden
@@ -17,6 +18,83 @@ LISTS = [
     ("spyware", "http://list.iblocklist.com/?list=llvtlsjyoyiczbkjsxpf&fileformat=p2p&archiveformat=gz"),
     ("ads (optional)", "http://list.iblocklist.com/?list=dgxtneitpuvgqqcpfulq&fileformat=p2p&archiveformat=gz")
 ]
+
+# Wiederholungskonfiguration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # Sekunden
+TIMEOUT = 30  # Sekunden pro Anfrage
+
+def download_with_retry(url, output_file, list_name, max_retries=MAX_RETRIES):
+    """
+    Datei mit exponentieller Backoff-Wiederholungslogik herunterladen.
+
+    Returns:
+        Tupel aus (erfolg: bool, fehlermeldung: str or None)
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                url,
+                headers={'User-Agent': 'curl/8.7.1'},
+                stream=True,
+                timeout=TIMEOUT
+            )
+            response.raise_for_status()  # Ausnahme für HTTP-Fehler auslösen
+
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024
+
+            with open(output_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True, desc=list_name) as bar:
+                for data in response.iter_content(block_size):
+                    f.write(data)
+                    bar.update(len(data))
+
+            return True, None
+
+        except requests.exceptions.Timeout:
+            error_msg = f"Zeitüberschreitung nach {TIMEOUT}s"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)  # Exponentieller Backoff
+                print(f"  ⚠ {error_msg}, erneuter Versuch in {wait_time}s... (Versuch {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, f"{error_msg}. Überprüfen Sie Ihre Internetverbindung oder versuchen Sie es später erneut."
+
+        except requests.exceptions.ConnectionError as e:
+            error_msg = "Verbindung fehlgeschlagen"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                print(f"  ⚠ {error_msg}, erneuter Versuch in {wait_time}s... (Versuch {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, f"{error_msg}. Überprüfen Sie Ihre Internetverbindung und Firewall-Einstellungen."
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, f"Liste nicht gefunden (HTTP 404). Die Quelle wurde möglicherweise entfernt oder verschoben."
+            elif e.response.status_code == 403:
+                return False, f"Zugriff verboten (HTTP 403). Die Quelle erfordert möglicherweise Authentifizierung oder blockiert automatisierten Zugriff."
+            elif e.response.status_code >= 500:
+                error_msg = f"Serverfehler (HTTP {e.response.status_code})"
+                if attempt < max_retries - 1:
+                    wait_time = RETRY_DELAY * (2 ** attempt)
+                    print(f"  ⚠ {error_msg}, erneuter Versuch in {wait_time}s... (Versuch {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    return False, f"{error_msg}. Der Server hat Probleme, versuchen Sie es später erneut."
+            else:
+                return False, f"HTTP-Fehler {e.response.status_code}: {str(e)}"
+
+        except Exception as e:
+            error_msg = f"Unerwarteter Fehler: {str(e)}"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                print(f"  ⚠ {error_msg}, erneuter Versuch in {wait_time}s... (Versuch {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, error_msg
+
+    return False, "Maximale Wiederholungsversuche überschritten"
 
 def is_valid_ip(ip_str):
     try:
@@ -167,43 +245,74 @@ def download_and_process_lists(block_list_path):
 
     # Alle IP-Bereiche von allen Listen sammeln
     all_ranges = []
+    successful_downloads = 0
+    failed_downloads = []
 
     for name, url in LISTS:
         print(f"\n→ Lade Liste: {name}")
         log_lines.append(f"[{name}] Download gestartet")
 
+        # Download mit Wiederholungslogik
+        success, error = download_with_retry(url, temp_file, name)
+
+        if not success:
+            failed_downloads.append((name, error))
+            log_lines.append(f"[{name}] Download fehlgeschlagen: {error}")
+            print(f"  ✗ Fehlgeschlagen: {error}")
+            continue
+
         try:
-            response = requests.get(url, headers={'User-Agent': 'curl/8.7.1'}, stream=True)
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024
-
-            with open(temp_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True) as bar:
-                for data in response.iter_content(block_size):
-                    f.write(data)
-                    bar.update(len(data))
-
+            # Datei dekomprimieren
             with gzip.open(temp_file, 'rb') as f_in:
                 with open(raw_file, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
             log_lines.append(f"[{name}] Download erfolgreich")
+            successful_downloads += 1
 
             # Bereiche aus dieser Liste parsen
             ranges = parse_ip_ranges_from_file(raw_file, log_lines, list_name=name)
             all_ranges.extend(ranges)
             log_lines.append(f"[{name}] {len(ranges)} IP-Bereiche extrahiert")
+            print(f"  ✓ {len(ranges):,} Bereiche extrahiert")
 
             os.remove(raw_file)
 
+        except gzip.BadGzipFile:
+            failed_downloads.append((name, "Ungültiges gzip-Dateiformat"))
+            log_lines.append(f"[{name}] Dekomprimierung fehlgeschlagen: Ungültiges gzip-Format")
+            print(f"  ✗ Ungültiges gzip-Format")
+
         except Exception as e:
-            log_lines.append(f"[{name}] Download fehlgeschlagen: {str(e)}")
-            print(f"✗ Download fehlgeschlagen {name}: {str(e)}")
+            failed_downloads.append((name, f"Verarbeitungsfehler: {str(e)}"))
+            log_lines.append(f"[{name}] Verarbeitung fehlgeschlagen: {str(e)}")
+            print(f"  ✗ Verarbeitung fehlgeschlagen: {str(e)}")
 
     if os.path.exists(temp_file):
         os.remove(temp_file)
 
+    # Prüfen, ob wir zumindest einige Daten haben
+    if not all_ranges:
+        error_msg = "Keine IP-Bereiche konnten heruntergeladen werden. Alle Quellen fehlgeschlagen."
+        log_lines.append(f"\n[FEHLER] {error_msg}")
+        print(f"\n✗ {error_msg}")
+        print("\nFehlgeschlagene Downloads:")
+        for name, error in failed_downloads:
+            print(f"  - {name}: {error}")
+
+        with open(log_file_path, 'w', encoding='utf-8') as log:
+            log.write('\n'.join(log_lines))
+        return
+
+    # Download-Zusammenfassung protokollieren
+    log_lines.append(f"\n[ZUSAMMENFASSUNG] Erfolgreich heruntergeladen: {successful_downloads}/{len(LISTS)} Quellen")
+    if failed_downloads:
+        log_lines.append(f"[ZUSAMMENFASSUNG] Fehlgeschlagene Downloads: {len(failed_downloads)}")
+        for name, error in failed_downloads:
+            log_lines.append(f"  - {name}: {error}")
+
     # Überlappende und benachbarte IP-Bereiche zusammenführen
-    print(f"\n→ Führe {len(all_ranges)} IP-Bereiche zusammen...")
+    print(f"\n→ Führe {len(all_ranges):,} IP-Bereiche zusammen...")
     log_lines.append(f"\n[MERGE] Starte Zusammenführung mit {len(all_ranges)} Gesamtbereichen")
 
     merged_ranges, merge_stats = merge_ip_ranges(all_ranges)
@@ -221,7 +330,12 @@ def download_and_process_lists(block_list_path):
     with open(log_file_path, 'w', encoding='utf-8') as log:
         log.write('\n'.join(log_lines))
 
-    print("\n✅ Alle Listen verarbeitet und zusammengeführt.")
+    print("\n✅ Verarbeitung abgeschlossen!")
+    print(f"→ Erfolgreich heruntergeladen: {successful_downloads}/{len(LISTS)} Quellen")
+    if failed_downloads:
+        print(f"→ Fehlgeschlagene Downloads: {len(failed_downloads)}")
+        for name, error in failed_downloads:
+            print(f"  - {name}: {error}")
     print(f"→ Ergebnis: {final_ipfilter_file}")
     print(f"→ Gesamteinträge: {merge_stats['merged_count']:,} (reduziert von {merge_stats['raw_count']:,})")
     print(f"→ Platzeinsparung: {merge_stats['reduction_percent']}%")

@@ -6,6 +6,7 @@ import shutil
 import datetime
 import ipaddress
 import re
+import time
 from tqdm import tqdm
 import argparse
 
@@ -19,6 +20,83 @@ LISTS = [
     ("spyware", "http://list.iblocklist.com/?list=llvtlsjyoyiczbkjsxpf&fileformat=p2p&archiveformat=gz"),
     ("ads (optional)", "http://list.iblocklist.com/?list=dgxtneitpuvgqqcpfulq&fileformat=p2p&archiveformat=gz")
 ]
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+TIMEOUT = 30  # seconds per request
+
+def download_with_retry(url, output_file, list_name, max_retries=MAX_RETRIES):
+    """
+    Download file with exponential backoff retry logic.
+
+    Returns:
+        Tuple of (success: bool, error_message: str or None)
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                url,
+                headers={'User-Agent': 'curl/8.7.1'},
+                stream=True,
+                timeout=TIMEOUT
+            )
+            response.raise_for_status()  # Raise exception for HTTP errors
+
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024
+
+            with open(output_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True, desc=list_name) as bar:
+                for data in response.iter_content(block_size):
+                    f.write(data)
+                    bar.update(len(data))
+
+            return True, None
+
+        except requests.exceptions.Timeout:
+            error_msg = f"Timeout after {TIMEOUT}s"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, f"{error_msg}. Check your internet connection or try again later."
+
+        except requests.exceptions.ConnectionError as e:
+            error_msg = "Connection failed"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, f"{error_msg}. Check your internet connection and firewall settings."
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, f"List not found (HTTP 404). The source may have been removed or relocated."
+            elif e.response.status_code == 403:
+                return False, f"Access forbidden (HTTP 403). The source may require authentication or block automated access."
+            elif e.response.status_code >= 500:
+                error_msg = f"Server error (HTTP {e.response.status_code})"
+                if attempt < max_retries - 1:
+                    wait_time = RETRY_DELAY * (2 ** attempt)
+                    print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    return False, f"{error_msg}. The server is experiencing issues, try again later."
+            else:
+                return False, f"HTTP error {e.response.status_code}: {str(e)}"
+
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, error_msg
+
+    return False, "Maximum retries exceeded"
 
 def is_valid_ip(ip_str):
     try:
@@ -173,43 +251,74 @@ def download_and_process_lists(block_list_path, overwrite=False):
 
     # Collect all IP ranges from all lists
     all_ranges = []
+    successful_downloads = 0
+    failed_downloads = []
 
     for name, url in LISTS:
         print(f"\n→ Downloading list: {name}")
         log_lines.append(f"[{name}] Download started")
 
+        # Download with retry logic
+        success, error = download_with_retry(url, temp_file, name)
+
+        if not success:
+            failed_downloads.append((name, error))
+            log_lines.append(f"[{name}] Download failed: {error}")
+            print(f"  ✗ Failed: {error}")
+            continue
+
         try:
-            response = requests.get(url, headers={'User-Agent': 'curl/8.7.1'}, stream=True)
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024
-
-            with open(temp_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True) as bar:
-                for data in response.iter_content(block_size):
-                    f.write(data)
-                    bar.update(len(data))
-
+            # Decompress the file
             with gzip.open(temp_file, 'rb') as f_in:
                 with open(raw_file, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
             log_lines.append(f"[{name}] Download successful")
+            successful_downloads += 1
 
             # Parse ranges from this list
             ranges = parse_ip_ranges_from_file(raw_file, log_lines, list_name=name)
             all_ranges.extend(ranges)
             log_lines.append(f"[{name}] Extracted {len(ranges)} IP ranges")
+            print(f"  ✓ Extracted {len(ranges):,} ranges")
 
             os.remove(raw_file)
 
+        except gzip.BadGzipFile:
+            failed_downloads.append((name, "Invalid gzip file format"))
+            log_lines.append(f"[{name}] Decompression failed: Invalid gzip format")
+            print(f"  ✗ Invalid gzip format")
+
         except Exception as e:
-            log_lines.append(f"[{name}] Download failed: {str(e)}")
-            print(f"✗ Failed to download {name}: {str(e)}")
+            failed_downloads.append((name, f"Processing error: {str(e)}"))
+            log_lines.append(f"[{name}] Processing failed: {str(e)}")
+            print(f"  ✗ Processing failed: {str(e)}")
 
     if os.path.exists(temp_file):
         os.remove(temp_file)
 
+    # Check if we have at least some data to work with
+    if not all_ranges:
+        error_msg = "No IP ranges could be downloaded. All sources failed."
+        log_lines.append(f"\n[ERROR] {error_msg}")
+        print(f"\n✗ {error_msg}")
+        print("\nFailed downloads:")
+        for name, error in failed_downloads:
+            print(f"  - {name}: {error}")
+
+        with open(log_file_path, 'w', encoding='utf-8') as log:
+            log.write('\n'.join(log_lines))
+        return
+
+    # Log download summary
+    log_lines.append(f"\n[SUMMARY] Successfully downloaded: {successful_downloads}/{len(LISTS)} sources")
+    if failed_downloads:
+        log_lines.append(f"[SUMMARY] Failed downloads: {len(failed_downloads)}")
+        for name, error in failed_downloads:
+            log_lines.append(f"  - {name}: {error}")
+
     # Merge overlapping and adjacent IP ranges
-    print(f"\n→ Merging {len(all_ranges)} IP ranges...")
+    print(f"\n→ Merging {len(all_ranges):,} IP ranges...")
     log_lines.append(f"\n[MERGE] Starting merge process with {len(all_ranges)} total ranges")
 
     merged_ranges, merge_stats = merge_ip_ranges(all_ranges)
@@ -227,7 +336,12 @@ def download_and_process_lists(block_list_path, overwrite=False):
     with open(log_file_path, 'w', encoding='utf-8') as log:
         log.write('\n'.join(log_lines))
 
-    print("\n✅ All lists downloaded and merged.")
+    print("\n✅ Processing complete!")
+    print(f"→ Successfully downloaded: {successful_downloads}/{len(LISTS)} sources")
+    if failed_downloads:
+        print(f"→ Failed downloads: {len(failed_downloads)}")
+        for name, error in failed_downloads:
+            print(f"  - {name}: {error}")
     print(f"→ Output file: {final_ipfilter_file}")
     print(f"→ Total entries: {merge_stats['merged_count']:,} (reduced from {merge_stats['raw_count']:,})")
     print(f"→ Space savings: {merge_stats['reduction_percent']}%")
