@@ -25,15 +25,84 @@ def is_valid_ip(ip_str):
     except ValueError:
         return False
 
-def convert_to_ipfilter_format(source_path, destination_path, log_lines, append=False, list_name=""):
-    mode = 'a' if append else 'w'
+def ip_to_int(ip_str):
+    """IP-Adresse als String in Integer umwandeln für effiziente Vergleiche."""
+    ip = ipaddress.ip_address(ip_str)
+    return int(ip)
+
+def int_to_ip(ip_int):
+    """Integer zurück in IP-Adresse String umwandeln."""
+    return str(ipaddress.ip_address(ip_int))
+
+def merge_ip_ranges(ranges):
+    """
+    Überlappende und benachbarte IP-Bereiche zusammenführen.
+
+    Args:
+        ranges: Liste von Tupeln (start_ip_str, end_ip_str, beschreibung)
+
+    Returns:
+        Liste zusammengeführter Tupel (start_ip_str, end_ip_str, beschreibung)
+        Statistik-Dict mit raw_count, merged_count, reduction_percent
+    """
+    if not ranges:
+        return [], {'raw_count': 0, 'merged_count': 0, 'reduction_percent': 0}
+
+    # In Integers konvertieren und sortieren
+    int_ranges = []
+    for start_ip, end_ip, desc in ranges:
+        start_int = ip_to_int(start_ip)
+        end_int = ip_to_int(end_ip)
+        if start_int <= end_int:
+            int_ranges.append((start_int, end_int, desc))
+
+    # Nach Start-IP sortieren, dann nach End-IP
+    int_ranges.sort(key=lambda x: (x[0], x[1]))
+
+    raw_count = len(int_ranges)
+    merged = []
+
+    if int_ranges:
+        current_start, current_end, current_desc = int_ranges[0]
+
+        for start, end, desc in int_ranges[1:]:
+            # Prüfen ob Bereiche überlappen oder benachbart sind (innerhalb 1 IP)
+            if start <= current_end + 1:
+                # Zusammenführen: aktuellen Bereich erweitern falls nötig
+                current_end = max(current_end, end)
+                # Erste Beschreibung für zusammengeführte Bereiche beibehalten
+            else:
+                # Keine Überlappung: aktuellen Bereich speichern und neuen starten
+                merged.append((int_to_ip(current_start), int_to_ip(current_end), current_desc))
+                current_start, current_end, current_desc = start, end, desc
+
+        # Letzten Bereich nicht vergessen
+        merged.append((int_to_ip(current_start), int_to_ip(current_end), current_desc))
+
+    merged_count = len(merged)
+    reduction_percent = ((raw_count - merged_count) * 100 // raw_count) if raw_count > 0 else 0
+
+    stats = {
+        'raw_count': raw_count,
+        'merged_count': merged_count,
+        'reduction_percent': reduction_percent
+    }
+
+    return merged, stats
+
+def parse_ip_ranges_from_file(source_path, log_lines, list_name=""):
+    """
+    IP-Bereiche aus Quelldatei parsen ohne auf Festplatte zu schreiben.
+
+    Returns:
+        Liste von Tupeln (start_ip, end_ip, beschreibung)
+    """
+    ranges = []
     converted = 0
     skipped = 0
     corrected = 0
 
-    with open(source_path, 'r', encoding='utf-8') as src, \
-         open(destination_path, mode, encoding='utf-8') as dst:
-
+    with open(source_path, 'r', encoding='utf-8') as src:
         for line_num, line in enumerate(src, start=1):
             original_line = line.strip()
             if not original_line or original_line.startswith('#'):
@@ -52,17 +121,26 @@ def convert_to_ipfilter_format(source_path, destination_path, log_lines, append=
                 continue
 
             description = original_line[:match.start()].rstrip(' :').strip()
-            converted_line = f"{ip_start} - {ip_end} , 000 , {description}"
-            dst.write(converted_line + '\n')
+            if not description:
+                description = list_name
+
+            ranges.append((ip_start, ip_end, description))
             converted += 1
 
             if not original_line.endswith(f"{ip_start}-{ip_end}"):
                 corrected += 1
-                log_lines.append(
-                    f"[{list_name}] [KORRIGIERT] Zeile {line_num}:\n  Original  : {original_line}\n  Umgewandelt: {converted_line}"
-                )
 
-    log_lines.append(f"[{list_name}] Statistik: {converted} verarbeitet, {corrected} korrigiert, {skipped} übersprungen\n")
+    log_lines.append(f"[{list_name}] Statistik: {converted} verarbeitet, {corrected} korrigiert, {skipped} übersprungen")
+    return ranges
+
+def write_merged_ranges(ranges, destination_path, log_lines):
+    """Zusammengeführte IP-Bereiche in Zieldatei schreiben."""
+    with open(destination_path, 'w', encoding='utf-8') as dst:
+        for ip_start, ip_end, description in ranges:
+            converted_line = f"{ip_start} - {ip_end} , 000 , {description}"
+            dst.write(converted_line + '\n')
+
+    log_lines.append(f"{len(ranges)} zusammengeführte Bereiche nach {destination_path} geschrieben")
 
 def download_and_process_lists(block_list_path):
     block_list_path_resolved = os.path.abspath(block_list_path)
@@ -87,7 +165,9 @@ def download_and_process_lists(block_list_path):
         print(f"- {name}")
     print()
 
-    first_list = True
+    # Alle IP-Bereiche von allen Listen sammeln
+    all_ranges = []
+
     for name, url in LISTS:
         print(f"\n→ Lade Liste: {name}")
         log_lines.append(f"[{name}] Download gestartet")
@@ -107,22 +187,34 @@ def download_and_process_lists(block_list_path):
                     shutil.copyfileobj(f_in, f_out)
 
             log_lines.append(f"[{name}] Download erfolgreich")
-            convert_to_ipfilter_format(
-                raw_file,
-                final_ipfilter_file,
-                log_lines,
-                append=not first_list,
-                list_name=name
-            )
 
-            first_list = False
+            # Bereiche aus dieser Liste parsen
+            ranges = parse_ip_ranges_from_file(raw_file, log_lines, list_name=name)
+            all_ranges.extend(ranges)
+            log_lines.append(f"[{name}] {len(ranges)} IP-Bereiche extrahiert")
+
             os.remove(raw_file)
 
         except Exception as e:
             log_lines.append(f"[{name}] Download fehlgeschlagen: {str(e)}")
+            print(f"✗ Download fehlgeschlagen {name}: {str(e)}")
 
     if os.path.exists(temp_file):
         os.remove(temp_file)
+
+    # Überlappende und benachbarte IP-Bereiche zusammenführen
+    print(f"\n→ Führe {len(all_ranges)} IP-Bereiche zusammen...")
+    log_lines.append(f"\n[MERGE] Starte Zusammenführung mit {len(all_ranges)} Gesamtbereichen")
+
+    merged_ranges, merge_stats = merge_ip_ranges(all_ranges)
+
+    log_lines.append(f"[MERGE] Rohe Bereiche: {merge_stats['raw_count']}")
+    log_lines.append(f"[MERGE] Zusammengeführte Bereiche: {merge_stats['merged_count']}")
+    log_lines.append(f"[MERGE] Reduzierung: {merge_stats['reduction_percent']}%")
+    log_lines.append(f"[MERGE] {merge_stats['raw_count'] - merge_stats['merged_count']} doppelte/überlappende Bereiche eliminiert\n")
+
+    # Zusammengeführte Bereiche in Datei schreiben
+    write_merged_ranges(merged_ranges, final_ipfilter_file, log_lines)
 
     log_lines.append(f"\n===== Verarbeitung abgeschlossen =====\n")
 
@@ -131,6 +223,8 @@ def download_and_process_lists(block_list_path):
 
     print("\n✅ Alle Listen verarbeitet und zusammengeführt.")
     print(f"→ Ergebnis: {final_ipfilter_file}")
+    print(f"→ Gesamteinträge: {merge_stats['merged_count']:,} (reduziert von {merge_stats['raw_count']:,})")
+    print(f"→ Platzeinsparung: {merge_stats['reduction_percent']}%")
     print(f"→ Protokoll: {log_file_path}")
 
     print("\nUm die IP-Filterdatei in qBittorrent zu verwenden:")
