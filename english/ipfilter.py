@@ -63,7 +63,7 @@ def download_with_retry(url, output_file, list_name, max_retries=MAX_RETRIES):
                 return False, f"{error_msg}. Check your internet connection or try again later."
 
         except requests.exceptions.ConnectionError as e:
-            error_msg = "Connection failed"
+            error_msg = f"Connection failed: {str(e)}"
             if attempt < max_retries - 1:
                 wait_time = RETRY_DELAY * (2 ** attempt)
                 print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
