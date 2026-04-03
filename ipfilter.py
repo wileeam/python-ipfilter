@@ -288,11 +288,17 @@ def download_and_process_lists(block_list_path, overwrite=False):
             failed_downloads.append((name, "Invalid gzip file format"))
             log_lines.append(f"[{name}] Decompression failed: Invalid gzip format")
             print(f"  ✗ Invalid gzip format")
+            # Clean up partial raw_file if it was created
+            if os.path.exists(raw_file):
+                os.remove(raw_file)
 
         except Exception as e:
             failed_downloads.append((name, f"Processing error: {str(e)}"))
             log_lines.append(f"[{name}] Processing failed: {str(e)}")
             print(f"  ✗ Processing failed: {str(e)}")
+            # Clean up partial raw_file if it was created
+            if os.path.exists(raw_file):
+                os.remove(raw_file)
 
     if os.path.exists(temp_file):
         os.remove(temp_file)
