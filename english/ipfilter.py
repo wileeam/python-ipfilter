@@ -35,21 +35,21 @@ def download_with_retry(url, output_file, list_name, max_retries=MAX_RETRIES):
     """
     for attempt in range(max_retries):
         try:
-            response = requests.get(
+            with requests.get(
                 url,
                 headers={'User-Agent': 'curl/8.7.1'},
                 stream=True,
                 timeout=TIMEOUT
-            )
-            response.raise_for_status()  # Raise exception for HTTP errors
+            ) as response:
+                response.raise_for_status()  # Raise exception for HTTP errors
 
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 1024
 
-            with open(output_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True, desc=list_name) as bar:
-                for data in response.iter_content(block_size):
-                    f.write(data)
-                    bar.update(len(data))
+                with open(output_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True, desc=list_name) as bar:
+                    for data in response.iter_content(block_size):
+                        f.write(data)
+                        bar.update(len(data))
 
             return True, None
 
