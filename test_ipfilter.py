@@ -6,8 +6,7 @@ Tests IP validation, conversion, merging, and file parsing logic.
 import unittest
 import tempfile
 import os
-import ipaddress
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import patch, MagicMock
 import ipfilter
 
 
