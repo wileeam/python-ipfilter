@@ -6,6 +6,7 @@ import shutil
 import datetime
 import ipaddress
 import re
+import time
 from tqdm import tqdm
 import argparse
 
@@ -20,6 +21,83 @@ LISTS = [
     ("ads (optional)", "http://list.iblocklist.com/?list=dgxtneitpuvgqqcpfulq&fileformat=p2p&archiveformat=gz")
 ]
 
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+TIMEOUT = 30  # seconds per request
+
+def download_with_retry(url, output_file, list_name, max_retries=MAX_RETRIES):
+    """
+    Download file with exponential backoff retry logic.
+
+    Returns:
+        Tuple of (success: bool, error_message: str or None)
+    """
+    for attempt in range(max_retries):
+        try:
+            with requests.get(
+                url,
+                headers={'User-Agent': 'curl/8.7.1'},
+                stream=True,
+                timeout=TIMEOUT
+            ) as response:
+                response.raise_for_status()  # Raise exception for HTTP errors
+
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 1024
+
+                with open(output_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True, desc=list_name) as bar:
+                    for data in response.iter_content(block_size):
+                        f.write(data)
+                        bar.update(len(data))
+
+            return True, None
+
+        except requests.exceptions.Timeout:
+            error_msg = f"Timeout after {TIMEOUT}s"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, f"{error_msg}. Check your internet connection or try again later."
+
+        except requests.exceptions.ConnectionError as e:
+            error_msg = f"Connection failed: {str(e)}"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, f"{error_msg}. Check your internet connection and firewall settings."
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, f"List not found (HTTP 404). The source may have been removed or relocated."
+            elif e.response.status_code == 403:
+                return False, f"Access forbidden (HTTP 403). The source may require authentication or block automated access."
+            elif e.response.status_code >= 500:
+                error_msg = f"Server error (HTTP {e.response.status_code})"
+                if attempt < max_retries - 1:
+                    wait_time = RETRY_DELAY * (2 ** attempt)
+                    print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    return False, f"{error_msg}. The server is experiencing issues, try again later."
+            else:
+                return False, f"HTTP error {e.response.status_code}: {str(e)}"
+
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            if attempt < max_retries - 1:
+                wait_time = RETRY_DELAY * (2 ** attempt)
+                print(f"  ⚠ {error_msg}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                return False, error_msg
+
+    return False, "Maximum retries exceeded"
+
 def is_valid_ip(ip_str):
     try:
         ipaddress.ip_address(ip_str)
@@ -27,15 +105,84 @@ def is_valid_ip(ip_str):
     except ValueError:
         return False
 
-def convert_to_ipfilter_format(source_path, destination_path, log_lines, append=False, list_name=""):
-    mode = 'a' if append else 'w'
+def ip_to_int(ip_str):
+    """Convert IP address string to integer for efficient comparison."""
+    ip = ipaddress.ip_address(ip_str)
+    return int(ip)
+
+def int_to_ip(ip_int):
+    """Convert integer back to IP address string."""
+    return str(ipaddress.ip_address(ip_int))
+
+def merge_ip_ranges(ranges):
+    """
+    Merge overlapping and adjacent IP ranges.
+
+    Args:
+        ranges: List of tuples (start_ip_str, end_ip_str, description)
+
+    Returns:
+        List of merged tuples (start_ip_str, end_ip_str, description)
+        Statistics dict with raw_count, merged_count, reduction_percent
+    """
+    if not ranges:
+        return [], {'raw_count': 0, 'merged_count': 0, 'reduction_percent': 0}
+
+    # Convert to integers and sort
+    int_ranges = []
+    for start_ip, end_ip, desc in ranges:
+        start_int = ip_to_int(start_ip)
+        end_int = ip_to_int(end_ip)
+        if start_int <= end_int:
+            int_ranges.append((start_int, end_int, desc))
+
+    # Sort by start IP, then by end IP
+    int_ranges.sort(key=lambda x: (x[0], x[1]))
+
+    raw_count = len(int_ranges)
+    merged = []
+
+    if int_ranges:
+        current_start, current_end, current_desc = int_ranges[0]
+
+        for start, end, desc in int_ranges[1:]:
+            # Check if ranges overlap or are adjacent (within 1 IP)
+            if start <= current_end + 1:
+                # Merge: extend current range if needed
+                current_end = max(current_end, end)
+                # Keep the first description for merged ranges
+            else:
+                # No overlap: save current range and start new one
+                merged.append((int_to_ip(current_start), int_to_ip(current_end), current_desc))
+                current_start, current_end, current_desc = start, end, desc
+
+        # Don't forget the last range
+        merged.append((int_to_ip(current_start), int_to_ip(current_end), current_desc))
+
+    merged_count = len(merged)
+    reduction_percent = ((raw_count - merged_count) * 100 // raw_count) if raw_count > 0 else 0
+
+    stats = {
+        'raw_count': raw_count,
+        'merged_count': merged_count,
+        'reduction_percent': reduction_percent
+    }
+
+    return merged, stats
+
+def parse_ip_ranges_from_file(source_path, log_lines, list_name=""):
+    """
+    Parse IP ranges from a source file without writing to disk.
+
+    Returns:
+        List of tuples (start_ip, end_ip, description)
+    """
+    ranges = []
     converted = 0
     skipped = 0
     corrected = 0
 
-    with open(source_path, 'r', encoding='utf-8') as src, \
-         open(destination_path, mode, encoding='utf-8') as dst:
-
+    with open(source_path, 'r', encoding='utf-8') as src:
         for line_num, line in enumerate(src, start=1):
             original_line = line.strip()
             if not original_line or original_line.startswith('#'):
@@ -54,17 +201,26 @@ def convert_to_ipfilter_format(source_path, destination_path, log_lines, append=
                 continue
 
             description = original_line[:match.start()].rstrip(' :').strip()
-            converted_line = f"{ip_start} - {ip_end} , 000 , {description}"
-            dst.write(converted_line + '\n')
+            if not description:
+                description = list_name
+
+            ranges.append((ip_start, ip_end, description))
             converted += 1
 
             if not original_line.endswith(f"{ip_start}-{ip_end}"):
                 corrected += 1
-                log_lines.append(
-                    f"[{list_name}] [CORRECTED] Line {line_num}:\n  Original  : {original_line}\n  Converted : {converted_line}"
-                )
 
-    log_lines.append(f"[{list_name}] Summary: {converted} processed, {corrected} corrected, {skipped} skipped\n")
+    log_lines.append(f"[{list_name}] Summary: {converted} processed, {corrected} corrected, {skipped} skipped")
+    return ranges
+
+def write_merged_ranges(ranges, destination_path, log_lines):
+    """Write merged IP ranges to destination file."""
+    with open(destination_path, 'w', encoding='utf-8') as dst:
+        for ip_start, ip_end, description in ranges:
+            converted_line = f"{ip_start} - {ip_end} , 000 , {description}"
+            dst.write(converted_line + '\n')
+
+    log_lines.append(f"Written {len(ranges)} merged ranges to {destination_path}")
 
 def download_and_process_lists(block_list_path, overwrite=False):
     block_list_path_resolved = os.path.abspath(block_list_path)
@@ -91,52 +247,104 @@ def download_and_process_lists(block_list_path, overwrite=False):
     print("The following IP filter lists will be downloaded and merged:\n")
     for name, _ in LISTS:
         print(f"- {name}")
-    print() 
+    print()
 
-    first_list = True
+    # Collect all IP ranges from all lists
+    all_ranges = []
+    successful_downloads = 0
+    failed_downloads = []
+
     for name, url in LISTS:
         print(f"\n→ Downloading list: {name}")
         log_lines.append(f"[{name}] Download started")
 
+        # Download with retry logic
+        success, error = download_with_retry(url, temp_file, name)
+
+        if not success:
+            failed_downloads.append((name, error))
+            log_lines.append(f"[{name}] Download failed: {error}")
+            print(f"  ✗ Failed: {error}")
+            continue
+
         try:
-            response = requests.get(url, headers={'User-Agent': 'curl/8.7.1'}, stream=True)
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024
-
-            with open(temp_file, 'wb') as f, tqdm(total=total_size, unit='iB', unit_scale=True) as bar:
-                for data in response.iter_content(block_size):
-                    f.write(data)
-                    bar.update(len(data))
-
+            # Decompress the file
             with gzip.open(temp_file, 'rb') as f_in:
                 with open(raw_file, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
             log_lines.append(f"[{name}] Download successful")
-            convert_to_ipfilter_format(
-                raw_file,
-                final_ipfilter_file,
-                log_lines,
-                append=not first_list,
-                list_name=name
-            )
+            successful_downloads += 1
 
-            first_list = False
+            # Parse ranges from this list
+            ranges = parse_ip_ranges_from_file(raw_file, log_lines, list_name=name)
+            all_ranges.extend(ranges)
+            log_lines.append(f"[{name}] Extracted {len(ranges)} IP ranges")
+            print(f"  ✓ Extracted {len(ranges):,} ranges")
+
             os.remove(raw_file)
 
+        except gzip.BadGzipFile:
+            failed_downloads.append((name, "Invalid gzip file format"))
+            log_lines.append(f"[{name}] Decompression failed: Invalid gzip format")
+            print(f"  ✗ Invalid gzip format")
+
         except Exception as e:
-            log_lines.append(f"[{name}] Download failed: {str(e)}")
+            failed_downloads.append((name, f"Processing error: {str(e)}"))
+            log_lines.append(f"[{name}] Processing failed: {str(e)}")
+            print(f"  ✗ Processing failed: {str(e)}")
 
     if os.path.exists(temp_file):
         os.remove(temp_file)
+
+    # Check if we have at least some data to work with
+    if not all_ranges:
+        error_msg = "No IP ranges could be downloaded. All sources failed."
+        log_lines.append(f"\n[ERROR] {error_msg}")
+        print(f"\n✗ {error_msg}")
+        print("\nFailed downloads:")
+        for name, error in failed_downloads:
+            print(f"  - {name}: {error}")
+
+        with open(log_file_path, 'w', encoding='utf-8') as log:
+            log.write('\n'.join(log_lines))
+        return
+
+    # Log download summary
+    log_lines.append(f"\n[SUMMARY] Successfully downloaded: {successful_downloads}/{len(LISTS)} sources")
+    if failed_downloads:
+        log_lines.append(f"[SUMMARY] Failed downloads: {len(failed_downloads)}")
+        for name, error in failed_downloads:
+            log_lines.append(f"  - {name}: {error}")
+
+    # Merge overlapping and adjacent IP ranges
+    print(f"\n→ Merging {len(all_ranges):,} IP ranges...")
+    log_lines.append(f"\n[MERGE] Starting merge process with {len(all_ranges)} total ranges")
+
+    merged_ranges, merge_stats = merge_ip_ranges(all_ranges)
+
+    log_lines.append(f"[MERGE] Raw ranges: {merge_stats['raw_count']}")
+    log_lines.append(f"[MERGE] Merged ranges: {merge_stats['merged_count']}")
+    log_lines.append(f"[MERGE] Reduction: {merge_stats['reduction_percent']}%")
+    log_lines.append(f"[MERGE] Eliminated {merge_stats['raw_count'] - merge_stats['merged_count']} duplicate/overlapping ranges\n")
+
+    # Write merged ranges to file
+    write_merged_ranges(merged_ranges, final_ipfilter_file, log_lines)
 
     log_lines.append(f"\n===== Processing completed =====\n")
 
     with open(log_file_path, 'w', encoding='utf-8') as log:
         log.write('\n'.join(log_lines))
 
-    print("\n✅ All lists downloaded and merged.")
+    print("\n✅ Processing complete!")
+    print(f"→ Successfully downloaded: {successful_downloads}/{len(LISTS)} sources")
+    if failed_downloads:
+        print(f"→ Failed downloads: {len(failed_downloads)}")
+        for name, error in failed_downloads:
+            print(f"  - {name}: {error}")
     print(f"→ Output file: {final_ipfilter_file}")
+    print(f"→ Total entries: {merge_stats['merged_count']:,} (reduced from {merge_stats['raw_count']:,})")
+    print(f"→ Space savings: {merge_stats['reduction_percent']}%")
     print(f"→ Log file   : {log_file_path}")
 
     print("\nTo use the IP filter in qBittorrent:")
