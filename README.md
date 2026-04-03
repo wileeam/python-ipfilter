@@ -103,8 +103,8 @@ To ensure code quality, configure branch protection rules on your main branch:
 1. Go to **Settings → Branches → Branch protection rules**
 2. Add a rule for your main branch (e.g., `main` or `master`)
 3. Enable: **Require status checks to pass before merging**
-4. Select the required status check: **test**
+4. Select all required status checks produced by the **Test Suite** workflow for each Python version in the test matrix (for example, the version-specific checks for Python 3.8, 3.9, 3.10, 3.11, and 3.12), rather than a single check named `test`
 5. Enable: **Require branches to be up to date before merging**
 
-This will prevent merging pull requests if the tests are not passing.
+This will prevent merging pull requests unless every required CI test job is passing.
 
