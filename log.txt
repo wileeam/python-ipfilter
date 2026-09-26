@@ -1,0 +1,42 @@
+===== IPFilter update started: 2026-09-26 08:24:00 =====
+
+[Level 1] Download started
+[Level 1] Download successful
+[Level 1] Summary: 236173 processed, 0 corrected, 0 skipped
+[Level 1] Extracted 236173 IP ranges
+[Anti-Infringement] Download started
+[Anti-Infringement] Download successful
+[Anti-Infringement] Summary: 25375 processed, 0 corrected, 0 skipped
+[Anti-Infringement] Extracted 25375 IP ranges
+[Spamhaus DROP] Download started
+[Spamhaus DROP] Download successful
+[Spamhaus DROP] Summary: 920 processed, 0 corrected, 0 skipped
+[Spamhaus DROP] Extracted 920 IP ranges
+[CINS Army] Download started
+[CINS Army] Download successful
+[CINS Army] Summary: 15000 processed, 0 corrected, 0 skipped
+[CINS Army] Extracted 15000 IP ranges
+[badpeers] Download started
+[badpeers] Download successful
+[badpeers] Summary: 48218 processed, 0 corrected, 0 skipped
+[badpeers] Extracted 48218 IP ranges
+[spyware] Download started
+[spyware] Download successful
+[spyware] Summary: 3288 processed, 0 corrected, 0 skipped
+[spyware] Extracted 3288 IP ranges
+[ads (optional)] Download started
+[ads (optional)] Download successful
+[ads (optional)] Summary: 3171 processed, 0 corrected, 0 skipped
+[ads (optional)] Extracted 3171 IP ranges
+
+[SUMMARY] Successfully downloaded: 7/7 sources
+
+[MERGE] Starting merge process with 332145 total ranges
+[MERGE] Raw ranges: 332145
+[MERGE] Merged ranges: 294638
+[MERGE] Reduction: 11%
+[MERGE] Eliminated 37507 duplicate/overlapping ranges
+
+Written 294638 merged ranges to /home/runner/work/python-ipfilter/python-ipfilter/ipfilter.dat
+
+===== Processing completed =====
